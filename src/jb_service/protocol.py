@@ -2,20 +2,35 @@
 Jumpboot communication protocol.
 
 Handles the REPL-based communication between jb-serve (Go) and the Python service.
+
+The jumpboot REPL works by:
+1. Go sends Python code as strings to execute
+2. Python executes and returns results
+
+So we don't run an event loop - we just set up global functions that
+the REPL can call directly, then return. The service instance stays
+alive in the Python process.
 """
 import asyncio
 import inspect
 import json
 import sys
 import traceback
-from typing import Any, Type
+from typing import Any, Type, get_type_hints
 
 from pydantic import BaseModel, ValidationError, create_model
-from pydantic.fields import FieldInfo
 
 from .service import Service
 from .method import is_method, is_async_method
 from .schema import service_to_schema, method_to_schema
+
+
+def get_type_hints_safe(fn):
+    """Get type hints, handling forward references gracefully."""
+    try:
+        return get_type_hints(fn)
+    except Exception:
+        return getattr(fn, '__annotations__', {})
 
 
 def build_pydantic_model(method_func) -> Type[BaseModel] | None:
@@ -26,21 +41,15 @@ def build_pydantic_model(method_func) -> Type[BaseModel] | None:
     """
     fn = getattr(method_func, '_jb_original', method_func)
     sig = inspect.signature(fn)
-    
-    try:
-        hints = get_type_hints_safe(fn)
-    except Exception:
-        hints = {}
+    hints = get_type_hints_safe(fn)
     
     fields = {}
     for param_name, param in sig.parameters.items():
         if param_name == 'self':
             continue
         
-        # Get type annotation or default to Any
         annotation = hints.get(param_name, Any)
         
-        # Handle default value
         if param.default is inspect.Parameter.empty:
             fields[param_name] = (annotation, ...)
         else:
@@ -52,16 +61,6 @@ def build_pydantic_model(method_func) -> Type[BaseModel] | None:
     return create_model(f'{fn.__name__}_Input', **fields)
 
 
-def get_type_hints_safe(fn):
-    """Get type hints, handling forward references gracefully."""
-    from typing import get_type_hints
-    try:
-        return get_type_hints(fn)
-    except Exception:
-        # Fall back to __annotations__ without resolving
-        return getattr(fn, '__annotations__', {})
-
-
 class Protocol:
     """
     Handles the jb-serve ↔ Python communication protocol.
@@ -70,10 +69,18 @@ class Protocol:
     def __init__(self, service: Service):
         self.service = service
         self._input_models: dict[str, Type[BaseModel] | None] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
         
         # Pre-build input models for all methods
         for name, method in service._methods.items():
             self._input_models[name] = build_pydantic_model(method)
+    
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Get or create an event loop for async methods."""
+        if self._loop is None or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        return self._loop
     
     def _validate_params(self, method_name: str, params: dict) -> dict:
         """Validate and coerce input parameters using Pydantic."""
@@ -87,9 +94,9 @@ class Protocol:
         except ValidationError as e:
             raise ValueError(f"Invalid parameters: {e}")
     
-    async def handle_call(self, method_name: str, params: dict) -> dict:
+    def handle_call(self, method_name: str, params: dict) -> dict:
         """
-        Handle an RPC call.
+        Handle an RPC call synchronously.
         
         Returns a response dict with ok, result/error, and done fields.
         """
@@ -102,7 +109,9 @@ class Protocol:
             
             # Call the method
             if is_async_method(method):
-                result = await method(**validated_params)
+                # Run async method in event loop
+                loop = self._get_loop()
+                result = loop.run_until_complete(method(**validated_params))
             else:
                 result = method(**validated_params)
             
@@ -127,95 +136,24 @@ class Protocol:
         """Return schema for a specific method."""
         method = self.service._get_method(method_name)
         return method_to_schema(method)
+    
+    def handle_methods(self) -> list[str]:
+        """Return list of available methods."""
+        return self.service._list_methods()
 
 
-async def run_async(service_class: Type[Service]):
-    """
-    Run the service with async support.
-    
-    This is the main entry point that handles:
-    1. Service instantiation and setup
-    2. Registering globals for jumpboot REPL
-    3. Handling RPC calls
-    4. Cleanup on exit
-    """
-    # Instantiate service
-    service = service_class()
-    protocol = Protocol(service)
-    
-    # Call setup
-    service.log.debug("Running setup...")
-    if asyncio.iscoroutinefunction(service.setup_async):
-        # Check if it's been overridden
-        if service.setup_async.__func__ is not Service.setup_async:
-            await service.setup_async()
-        else:
-            service.setup()
-    else:
-        service.setup()
-    service.log.debug("Setup complete")
-    
-    # Create the __jb_call__ handler
-    loop = asyncio.get_event_loop()
-    
-    def __jb_call__(method: str, params: dict = None) -> dict:
-        """Synchronous wrapper for async call handler."""
-        if params is None:
-            params = {}
-        
-        # Run the async handler in the event loop
-        future = asyncio.run_coroutine_threadsafe(
-            protocol.handle_call(method, params),
-            loop
-        )
-        return future.result()
-    
-    def __jb_schema__() -> dict:
-        """Return service schema."""
-        return protocol.handle_schema()
-    
-    def __jb_method_schema__(method_name: str) -> dict:
-        """Return method schema."""
-        return protocol.handle_method_schema(method_name)
-    
-    def __jb_methods__() -> list[str]:
-        """List available methods."""
-        return service._list_methods()
-    
-    # Register globals for jumpboot REPL
-    import builtins
-    builtins.__jb_call__ = __jb_call__
-    builtins.__jb_schema__ = __jb_schema__
-    builtins.__jb_method_schema__ = __jb_method_schema__
-    builtins.__jb_methods__ = __jb_methods__
-    
-    # Signal ready
-    print("__JB_READY__", flush=True)
-    service.log.info(f"Service {service.name} ready")
-    
-    try:
-        # Keep the event loop running
-        # The jumpboot REPL will call our globals directly
-        while True:
-            await asyncio.sleep(3600)  # Sleep, wake periodically
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        # Cleanup
-        service.log.debug("Running teardown...")
-        if asyncio.iscoroutinefunction(service.teardown_async):
-            if service.teardown_async.__func__ is not Service.teardown_async:
-                await service.teardown_async()
-            else:
-                service.teardown()
-        else:
-            service.teardown()
-        service.log.debug("Teardown complete")
+# Global service instance and protocol - set by run()
+_service_instance: Service | None = None
+_protocol: Protocol | None = None
 
 
 def run(service_class: Type[Service]):
     """
-    Run a service. This is the main entry point.
+    Initialize and run a service.
+    
+    This sets up the service and registers global functions for jumpboot
+    to call. It doesn't block - the Python process stays alive and the
+    REPL can call __jb_call__ etc. directly.
     
     Usage:
         from jb_service import Service, method, run
@@ -228,7 +166,77 @@ def run(service_class: Type[Service]):
         if __name__ == "__main__":
             run(MyService)
     """
-    try:
-        asyncio.run(run_async(service_class))
-    except KeyboardInterrupt:
-        pass
+    global _service_instance, _protocol
+    
+    # Instantiate service
+    _service_instance = service_class()
+    _protocol = Protocol(_service_instance)
+    
+    # Call setup
+    if asyncio.iscoroutinefunction(service_class.setup_async):
+        # Check if setup_async is overridden
+        if service_class.setup_async is not Service.setup_async:
+            loop = _protocol._get_loop()
+            loop.run_until_complete(_service_instance.setup_async())
+        else:
+            _service_instance.setup()
+    else:
+        _service_instance.setup()
+    
+    # Register globals for jumpboot REPL to call
+    # These become available in the REPL's global namespace
+    
+    def __jb_call__(method: str, params: dict = None) -> dict:
+        """Call a service method. Returns {ok, result/error, done}."""
+        if params is None:
+            params = {}
+        return _protocol.handle_call(method, params)
+    
+    def __jb_schema__() -> dict:
+        """Get full service schema."""
+        return _protocol.handle_schema()
+    
+    def __jb_method_schema__(method_name: str) -> dict:
+        """Get schema for a specific method."""
+        return _protocol.handle_method_schema(method_name)
+    
+    def __jb_methods__() -> list[str]:
+        """List available method names."""
+        return _protocol.handle_methods()
+    
+    def __jb_shutdown__():
+        """Shutdown the service (calls teardown)."""
+        global _service_instance, _protocol
+        if _service_instance is not None:
+            _service_instance.log.debug("Running teardown...")
+            
+            if asyncio.iscoroutinefunction(type(_service_instance).teardown_async):
+                if type(_service_instance).teardown_async is not Service.teardown_async:
+                    loop = _protocol._get_loop()
+                    loop.run_until_complete(_service_instance.teardown_async())
+                else:
+                    _service_instance.teardown()
+            else:
+                _service_instance.teardown()
+            
+            _service_instance.log.debug("Teardown complete")
+            _service_instance = None
+            _protocol = None
+        return {"ok": True}
+    
+    # Register in builtins so they're accessible from REPL
+    import builtins
+    builtins.__jb_call__ = __jb_call__
+    builtins.__jb_schema__ = __jb_schema__
+    builtins.__jb_method_schema__ = __jb_method_schema__
+    builtins.__jb_methods__ = __jb_methods__
+    builtins.__jb_shutdown__ = __jb_shutdown__
+    
+    # Also register in globals (belt and suspenders)
+    globals()['__jb_call__'] = __jb_call__
+    globals()['__jb_schema__'] = __jb_schema__
+    globals()['__jb_method_schema__'] = __jb_method_schema__
+    globals()['__jb_methods__'] = __jb_methods__
+    globals()['__jb_shutdown__'] = __jb_shutdown__
+    
+    # Service is ready - globals are registered

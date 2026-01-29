@@ -10,11 +10,15 @@ from typing import Any
 class ServiceLogger:
     """
     Logger that routes to jb-serve via stdout protocol.
+    
+    Note: Logging is disabled by default when running under jumpboot REPL
+    because the REPL captures stderr and it interferes with the protocol.
+    Enable with logger._enabled = True if you need logs.
     """
     
     def __init__(self, name: str):
         self.name = name
-        self._enabled = True
+        self._enabled = False  # Disabled by default for REPL compatibility
     
     def _emit(self, level: str, message: str, extra: dict | None = None):
         """Emit a log message via the jb protocol."""
