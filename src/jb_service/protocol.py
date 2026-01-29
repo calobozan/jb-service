@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError, create_model
 from .service import Service
 from .method import is_method, is_async_method
 from .schema import service_to_schema, method_to_schema
+from .types import get_file_type_name, convert_file_param
 
 
 def get_type_hints_safe(fn):
@@ -94,6 +95,32 @@ class Protocol:
         except ValidationError as e:
             raise ValueError(f"Invalid parameters: {e}")
     
+    def _convert_file_params(self, method_name: str, params: dict) -> dict:
+        """
+        Convert file parameters based on type hints.
+        
+        If a parameter is typed as Audio, Image, etc., load the file
+        and replace the path with the loaded data.
+        """
+        method = self.service._get_method(method_name)
+        fn = getattr(method, '_jb_original', method)
+        hints = get_type_hints_safe(fn)
+        
+        converted = dict(params)
+        for param_name, annotation in hints.items():
+            if param_name == 'return':
+                continue
+            if param_name not in converted:
+                continue
+            
+            type_name = get_file_type_name(annotation)
+            if type_name and isinstance(converted[param_name], str):
+                converted[param_name] = convert_file_param(
+                    converted[param_name], type_name
+                )
+        
+        return converted
+    
     def handle_call(self, method_name: str, params: dict) -> dict:
         """
         Handle an RPC call synchronously.
@@ -107,13 +134,16 @@ class Protocol:
             # Validate parameters
             validated_params = self._validate_params(method_name, params)
             
+            # Convert file parameters (Audio, Image, etc.)
+            converted_params = self._convert_file_params(method_name, validated_params)
+            
             # Call the method
             if is_async_method(method):
                 # Run async method in event loop
                 loop = self._get_loop()
-                result = loop.run_until_complete(method(**validated_params))
+                result = loop.run_until_complete(method(**converted_params))
             else:
-                result = method(**validated_params)
+                result = method(**converted_params)
             
             return {"ok": True, "result": result, "done": True}
         
