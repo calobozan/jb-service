@@ -185,31 +185,31 @@ def run(service_class: Type[Service]):
     
     # Register globals for jumpboot REPL to call
     # These become available in the REPL's global namespace
+    # All functions return JSON strings for easy parsing in Go
     
-    def __jb_call__(method: str, params: dict = None) -> dict:
-        """Call a service method. Returns {ok, result/error, done}."""
+    def __jb_call__(method: str, params: dict = None) -> str:
+        """Call a service method. Returns JSON string {ok, result/error, done}."""
         if params is None:
             params = {}
-        return _protocol.handle_call(method, params)
+        result = _protocol.handle_call(method, params)
+        return json.dumps(result)
     
-    def __jb_schema__() -> dict:
-        """Get full service schema."""
-        return _protocol.handle_schema()
+    def __jb_schema__() -> str:
+        """Get full service schema as JSON string."""
+        return json.dumps(_protocol.handle_schema())
     
-    def __jb_method_schema__(method_name: str) -> dict:
-        """Get schema for a specific method."""
-        return _protocol.handle_method_schema(method_name)
+    def __jb_method_schema__(method_name: str) -> str:
+        """Get method schema as JSON string."""
+        return json.dumps(_protocol.handle_method_schema(method_name))
     
-    def __jb_methods__() -> list[str]:
-        """List available method names."""
-        return _protocol.handle_methods()
+    def __jb_methods__() -> str:
+        """List available method names as JSON array string."""
+        return json.dumps(_protocol.handle_methods())
     
-    def __jb_shutdown__():
-        """Shutdown the service (calls teardown)."""
+    def __jb_shutdown__() -> str:
+        """Shutdown the service (calls teardown). Returns JSON string."""
         global _service_instance, _protocol
         if _service_instance is not None:
-            _service_instance.log.debug("Running teardown...")
-            
             if asyncio.iscoroutinefunction(type(_service_instance).teardown_async):
                 if type(_service_instance).teardown_async is not Service.teardown_async:
                     loop = _protocol._get_loop()
@@ -219,10 +219,9 @@ def run(service_class: Type[Service]):
             else:
                 _service_instance.teardown()
             
-            _service_instance.log.debug("Teardown complete")
             _service_instance = None
             _protocol = None
-        return {"ok": True}
+        return json.dumps({"ok": True})
     
     # Register in builtins so they're accessible from REPL
     import builtins
