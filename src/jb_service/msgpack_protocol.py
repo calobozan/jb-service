@@ -54,17 +54,18 @@ def run_msgpack(service_class: Type[Service]):
     # Create server without auto-exposing (we'll register manually)
     server = MessagePackQueueServer(auto_start=False, expose_methods=False)
     
-    # Register each @method as a handler
+    # Register each @method as a handler using register_handler
+    # (which takes data, request_id directly without signature inspection)
     for method_name, method in service._methods.items():
         wrapper = _create_method_wrapper(service, method_name, method, loop)
-        server.register_method(method_name, wrapper)
+        server.register_handler(method_name, wrapper)
     
     # Register introspection methods
-    async def jb_methods():
+    async def jb_methods(data, request_id):
         return service._list_methods()
-    server.register_method("__jb_methods__", jb_methods)
+    server.register_handler("__jb_methods__", jb_methods)
     
-    async def jb_shutdown():
+    async def jb_shutdown(data, request_id):
         if asyncio.iscoroutinefunction(type(service).teardown_async):
             if type(service).teardown_async is not Service.teardown_async:
                 loop.run_until_complete(service.teardown_async())
@@ -74,7 +75,7 @@ def run_msgpack(service_class: Type[Service]):
             service.teardown()
         server.running = False
         return {"ok": True}
-    server.register_method("__jb_shutdown__", jb_shutdown)
+    server.register_handler("__jb_shutdown__", jb_shutdown)
     
     # Start and run
     server.start()
@@ -86,15 +87,16 @@ def _create_method_wrapper(service: Service, method_name: str, method, loop):
     """Create a wrapper for a service method.
     
     The wrapper handles file type conversion and calls the original method.
-    jumpboot's register_method will wrap this further.
+    Uses register_handler signature: (data, request_id).
     """
     fn = getattr(method, '_jb_original', method)
     hints = get_type_hints_safe(fn)
-    sig = inspect.signature(fn)
     
-    # Build a wrapper with the same signature as the original method
-    async def wrapper(**kwargs):
+    async def wrapper(data, request_id):
         try:
+            # Extract kwargs from data
+            kwargs = data if isinstance(data, dict) else {}
+            
             # Convert file parameters based on type hints
             converted = dict(kwargs)
             for param_name, annotation in hints.items():
