@@ -154,3 +154,98 @@ def convert_file_param(value: str, type_name: str):
         return load_image(value)
     else:
         return value
+
+
+# Output helpers
+
+def save_image(image, format: str = "png", quality: int = 95) -> str:
+    """
+    Save a PIL Image or numpy array to a temp file and return the path.
+    
+    Use this to return images from methods - jb-serve will wrap it as a FileRef.
+    
+    Args:
+        image: PIL.Image or numpy array
+        format: Output format (png, jpg, webp)
+        quality: JPEG/WebP quality (1-100)
+    
+    Returns:
+        Path to the saved file
+    
+    Example:
+        @method
+        def generate(self, prompt: str) -> dict:
+            image = self.pipeline(prompt).images[0]
+            return {"image": save_image(image, format="png")}
+    """
+    import tempfile
+    import uuid
+    
+    # Convert numpy to PIL if needed
+    try:
+        import numpy as np
+        if isinstance(image, np.ndarray):
+            from PIL import Image as PILImage
+            image = PILImage.fromarray(image)
+    except ImportError:
+        pass
+    
+    # Save to temp file
+    ext = format.lower()
+    if ext == "jpg":
+        ext = "jpeg"
+    
+    filename = f"{uuid.uuid4()}.{format.lower()}"
+    filepath = os.path.join(tempfile.gettempdir(), "jb-outputs", filename)
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    save_kwargs = {}
+    if format.lower() in ("jpeg", "jpg", "webp"):
+        save_kwargs["quality"] = quality
+    
+    image.save(filepath, **save_kwargs)
+    return filepath
+
+
+def save_audio(data, sample_rate: int, format: str = "wav") -> str:
+    """
+    Save audio data to a temp file and return the path.
+    
+    Args:
+        data: numpy array of audio samples
+        sample_rate: Sample rate in Hz
+        format: Output format (wav, mp3, flac)
+    
+    Returns:
+        Path to the saved file
+    """
+    import tempfile
+    import uuid
+    
+    filename = f"{uuid.uuid4()}.{format.lower()}"
+    filepath = os.path.join(tempfile.gettempdir(), "jb-outputs", filename)
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    try:
+        import soundfile as sf
+        sf.write(filepath, data, sample_rate)
+        return filepath
+    except ImportError:
+        pass
+    
+    try:
+        from scipy.io import wavfile
+        import numpy as np
+        # scipy expects int16 for wav
+        if data.dtype in (np.float32, np.float64):
+            data = (data * 32767).astype(np.int16)
+        wavfile.write(filepath, sample_rate, data)
+        return filepath
+    except ImportError:
+        pass
+    
+    raise ImportError(
+        "No audio library available. Install one of: soundfile, scipy\n"
+        "  pip install soundfile\n"
+        "  pip install scipy"
+    )

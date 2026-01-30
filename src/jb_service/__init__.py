@@ -23,7 +23,12 @@ Usage:
 from .service import Service
 from .method import method
 from .protocol import run
-from .types import FilePath, Audio, Image
+from .types import FilePath, Audio, Image, save_image, save_audio
 
 __version__ = "0.1.0"
-__all__ = ["Service", "method", "run", "FilePath", "Audio", "Image", "__version__"]
+__all__ = [
+    "Service", "method", "run",
+    "FilePath", "Audio", "Image",
+    "save_image", "save_audio",
+    "__version__"
+]
