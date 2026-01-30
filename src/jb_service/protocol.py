@@ -181,9 +181,9 @@ def run(service_class: Type[Service]):
     """
     Initialize and run a service.
     
-    This sets up the service and registers global functions for jumpboot
-    to call. It doesn't block - the Python process stays alive and the
-    REPL can call __jb_call__ etc. directly.
+    Automatically detects the transport based on the service class:
+    - Service subclass: Uses REPL protocol (simple, but stdout-sensitive)
+    - MessagePackService subclass: Uses MessagePack queue (robust, stdout-safe)
     
     Usage:
         from jb_service import Service, method, run
@@ -196,6 +196,14 @@ def run(service_class: Type[Service]):
         if __name__ == "__main__":
             run(MyService)
     """
+    # Check if this is a MessagePackService
+    transport = getattr(service_class, '_transport', 'repl')
+    
+    if transport == 'msgpack':
+        from .msgpack_protocol import run_msgpack
+        return run_msgpack(service_class)
+    
+    # Default: REPL protocol
     global _service_instance, _protocol
     
     # Instantiate service
