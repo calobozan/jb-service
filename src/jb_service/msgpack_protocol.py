@@ -60,11 +60,11 @@ def run_msgpack(service_class: Type[Service]):
         server.register_method(method_name, wrapper)
     
     # Register introspection methods
-    async def jb_methods(data, request_id):
+    async def jb_methods():
         return service._list_methods()
     server.register_method("__jb_methods__", jb_methods)
     
-    async def jb_shutdown(data, request_id):
+    async def jb_shutdown():
         if asyncio.iscoroutinefunction(type(service).teardown_async):
             if type(service).teardown_async is not Service.teardown_async:
                 loop.run_until_complete(service.teardown_async())
@@ -83,15 +83,18 @@ def run_msgpack(service_class: Type[Service]):
 
 
 def _create_method_wrapper(service: Service, method_name: str, method, loop):
-    """Create an async wrapper for a service method."""
+    """Create a wrapper for a service method.
+    
+    The wrapper handles file type conversion and calls the original method.
+    jumpboot's register_method will wrap this further.
+    """
     fn = getattr(method, '_jb_original', method)
     hints = get_type_hints_safe(fn)
+    sig = inspect.signature(fn)
     
-    async def wrapper(data, request_id):
+    # Build a wrapper with the same signature as the original method
+    async def wrapper(**kwargs):
         try:
-            # Convert data to kwargs
-            kwargs = data if isinstance(data, dict) else {}
-            
             # Convert file parameters based on type hints
             converted = dict(kwargs)
             for param_name, annotation in hints.items():
