@@ -33,23 +33,16 @@ def run_msgpack(service_class: Type[Service]):
     not installed via pip.
     """
     # jumpboot is injected at runtime by QueueProcess
-    from jumpboot import MessagePackQueueServer, exposed
-    
-    # Create a dynamic server class that wraps our service
-    class ServiceServer(MessagePackQueueServer):
-        def __init__(self, service_instance):
-            super().__init__()
-            self.service = service_instance
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+    from jumpboot import MessagePackQueueServer
     
     # Instantiate service first
     service = service_class()
     
-    # Call setup
+    # Create event loop for async support
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Call setup
     if asyncio.iscoroutinefunction(service_class.setup_async):
         if service_class.setup_async is not Service.setup_async:
             loop.run_until_complete(service.setup_async())
@@ -58,21 +51,20 @@ def run_msgpack(service_class: Type[Service]):
     else:
         service.setup()
     
-    # Create server
-    server = ServiceServer(service)
+    # Create server without auto-exposing (we'll register manually)
+    server = MessagePackQueueServer(auto_start=False, expose_methods=False)
     
-    # Dynamically add exposed methods for each @method in service
+    # Register each @method as a handler
     for method_name, method in service._methods.items():
-        _add_exposed_method(server, service, method_name, method, loop)
+        wrapper = _create_method_wrapper(service, method_name, method, loop)
+        server.register_method(method_name, wrapper)
     
-    # Add introspection methods
-    @exposed
-    async def __jb_methods__() -> list:
+    # Register introspection methods
+    async def jb_methods(data, request_id):
         return service._list_methods()
-    server.__jb_methods__ = __jb_methods__
+    server.register_method("__jb_methods__", jb_methods)
     
-    @exposed
-    async def __jb_shutdown__() -> dict:
+    async def jb_shutdown(data, request_id):
         if asyncio.iscoroutinefunction(type(service).teardown_async):
             if type(service).teardown_async is not Service.teardown_async:
                 loop.run_until_complete(service.teardown_async())
@@ -82,23 +74,24 @@ def run_msgpack(service_class: Type[Service]):
             service.teardown()
         server.running = False
         return {"ok": True}
-    server.__jb_shutdown__ = __jb_shutdown__
+    server.register_method("__jb_shutdown__", jb_shutdown)
     
-    # Run until stopped
+    # Start and run
+    server.start()
     while server.running:
         time.sleep(0.1)
 
 
-def _add_exposed_method(server, service: Service, method_name: str, method, loop):
-    """Add an exposed method to the server for a service method."""
-    from jumpboot import exposed
-    
+def _create_method_wrapper(service: Service, method_name: str, method, loop):
+    """Create an async wrapper for a service method."""
     fn = getattr(method, '_jb_original', method)
     hints = get_type_hints_safe(fn)
     
-    # Create async wrapper
-    async def handler(**kwargs):
+    async def wrapper(data, request_id):
         try:
+            # Convert data to kwargs
+            kwargs = data if isinstance(data, dict) else {}
+            
             # Convert file parameters based on type hints
             converted = dict(kwargs)
             for param_name, annotation in hints.items():
@@ -122,9 +115,7 @@ def _add_exposed_method(server, service: Service, method_name: str, method, loop
             return result
         
         except Exception as e:
-            raise Exception(f"{type(e).__name__}: {str(e)}")
+            # Re-raise with traceback info
+            raise Exception(f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
     
-    # Apply exposed decorator and add to server
-    handler.__name__ = method_name
-    exposed_handler = exposed(handler)
-    setattr(server, method_name, exposed_handler)
+    return wrapper
