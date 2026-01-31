@@ -6,6 +6,8 @@ import sys
 import json
 from typing import Any
 
+from .filestore import FileStore
+
 
 class ServiceLogger:
     """
@@ -82,6 +84,9 @@ class Service:
         
         # Initialize logger
         self.log = ServiceLogger(self.name)
+        
+        # Initialize file store client
+        self.files = FileStore()
         
         # Discover @method decorated methods
         self._methods: dict[str, Any] = {}
