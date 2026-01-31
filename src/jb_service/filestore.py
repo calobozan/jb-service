@@ -109,7 +109,7 @@ class FileStore:
         data = {
             'path': os.path.abspath(path),
             'name': name or os.path.basename(path),
-            'ttl': ttl,
+            'ttl': int(ttl),  # Ensure integer for Go
         }
         
         result = self._request('POST', self._store_url, json_data=data)
